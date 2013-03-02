@@ -20,7 +20,10 @@
 #include <config.h>
 #endif
 
-#include <systemd/sd-journal.h>
+/*#include <systemd/sd-journal.h>*/
+#include <syslog.h>
+#include <stdarg.h>
+
 #include <stdlib.h>
 #include <stdio.h>
 #include <string.h>
@@ -46,7 +49,10 @@ int log_print(int verbosity, const char *format, ...) {
         va_start(ap, format);
         asprintf(&formatwithtid, "[%s] [tid=%lu] %s", PACKAGE_VERSION, syscall(SYS_gettid), format);
         assert(formatwithtid);
-        r = sd_journal_printv(verbosity, formatwithtid, ap);
+        /*r = sd_journal_printv(verbosity, formatwithtid, ap); */
+        openlog("fusedav", LOG_CONS | LOG_PID | LOG_NDELAY, LOG_LOCAL7);
+        syslog(verbosity, formatwithtid, ap);
+        closelog();
         free(formatwithtid);
         va_end(ap);
     }

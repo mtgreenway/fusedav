@@ -333,6 +333,7 @@ static fd_t ldb_get_fresh_fd(ne_session *session, ldb_filecache_t *cache,
                 ne_end_request(req);
                 goto finish;
             }
+            // mgreenway FINDME  we want to prevent this shit from hapepening 
             ne_read_response_to_fd(req, ret_fd);
 
             // Point the persistent cache to the new file content.

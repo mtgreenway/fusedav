@@ -19,7 +19,8 @@
   Inc., 59 Temple Place, Suite 330, Boston, MA 02111-1307 USA
 ***/
 
-#include <systemd/sd-journal.h>
+/* #include <systemd/sd-journal.h> */
+#include <syslog.h>
 
 void log_set_maximum_verbosity(int verbosity);
 int log_print(int verbosity, const char *format, ...);
