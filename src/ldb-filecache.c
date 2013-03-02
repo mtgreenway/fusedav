@@ -37,6 +37,9 @@
 #include "fusedav.h"
 #include "log.h"
 
+// mgreenway
+#include "buffer.h"
+
 #include <ne_uri.h>
 
 #define REFRESH_INTERVAL 3
@@ -50,6 +53,19 @@ struct ldb_filecache_sdata {
     bool readable;
     bool writable;
     bool modified;
+
+    // Lets start of by putting our extra stuff in the session data
+    // we will have to test this but I assume hijacking this struct
+    // will prevent memory issues because it has already been tested
+    // by the great folks at Pantheon.  Need to see if we should
+    // actually be hijacking the persistent data.
+
+    pthread_mutex_t mutex;
+    ne_off_t server_length, present;
+    char *buf;
+    ssize_t offset;
+    ssize_t size;
+
 };
 
 // FIX ME Where to find ETAG_MAX?
@@ -333,8 +349,10 @@ static fd_t ldb_get_fresh_fd(ne_session *session, ldb_filecache_t *cache,
                 ne_end_request(req);
                 goto finish;
             }
-            // mgreenway FINDME  we want to prevent this shit from hapepening 
-            ne_read_response_to_fd(req, ret_fd);
+            // mgreenway FINDME  we want to prevent this from hapepening
+            // We actually want to do the exact opposite here which is what
+            // brought me to fusedav in the first place, streaming!
+            //ne_read_response_to_fd(req, ret_fd);
 
             // Point the persistent cache to the new file content.
             pdata->last_server_update = time(NULL);
@@ -390,6 +408,40 @@ int ldb_filecache_open(char *cache_path, ldb_filecache_t *cache, const char *pat
         goto fail;
     }
     memset(sdata, 0, sizeof(struct ldb_filecache_sdata));
+
+    // mgreenway want to initialize the hijacked struct members
+
+    // TODO:
+    // So we already no this information and it is in the stat struct
+    // which we don't have immediate access to.  There must be better easier
+    // way to get this
+    ne_request *req = NULL;
+    req = ne_request_create(session, "HEAD", path);
+    assert(req);
+
+    if (ne_request_dispatch(req) != NE_OK) {
+        sd_journal_print(LOG_ERR, "HEAD failed: %s", ne_get_error(session));
+        ret = ENOENT;
+        goto fail;
+    }
+
+    const char *length = ne_get_response_header(req, "Content-Length");
+    sdata->server_length = length ? atoll(length) : 0;
+
+    ne_request_destroy(req);
+
+    // end porbably unneeded file size get
+
+    sdata->offset = 0;
+    sdata->size = 0;
+
+    // need to get server_length
+    if (sdata->server_length < BUFFER_SIZE) {
+        sdata->buf = malloc(sdata->server_length);
+    }
+    else {
+        sdata->buf = malloc(BUFFER_SIZE);
+    }
 
     // If open is called twice, both times with O_CREAT, fuse does not pass O_CREAT
     // the second time. (Unlike on a linux file system, where the second time open
@@ -448,25 +500,102 @@ finish:
     return ret;
 }
 
+//mgreenway
+static int buf_load_up_to_unlocked(struct file_info *fi, off_t l, char *buf) {
+
+    ne_session *session;
+    //assert(fi);
+    if (!(session = session_get(1))) {
+        errno = EIO;
+        return -1;
+    }
+
+    if (l > fi->server_length)
+        l = fi->server_length;
+
+    if (l <= fi->present)
+        return 0;
+
+    ne_content_range range;
+    range.start = fi->present;
+    range.end = l-1;
+    range.total = 0;
+
+    ssize_t bytes_read;
+
+    if (buf_ne_get_range(session, fi->filename, &range, buf, &bytes_read) != NE_OK) {
+        log_print(LOG_DEBUG, "GET failed: %s\n", ne_get_error(session));
+        errno = ENOENT;
+        return -1;
+    }
+
+    return bytes_read;
+}
+
+
+
 // top-level read call
+// mgreenway: we need rewrite this to stream data
 ssize_t ldb_filecache_read(struct fuse_file_info *info, char *buf, size_t size, ne_off_t offset) {
-    struct ldb_filecache_sdata *sdata = (struct ldb_filecache_sdata *)info->fh;
-    ssize_t ret = -1;
 
-    log_print(LOG_DEBUG, "ldb_filecache_read: fd=%d", sdata->fd);
+    struct ldb_filecache_sdata *fi = (struct ldb_filecache_sdata *)info->fh;
+    ssize_t r = -1;
+    log_print(LOG_DEBUG, "mgreenway_filecache_read: fd=%d", fi->fd);
 
-    if ((ret = pread(sdata->fd, buf, size, offset)) < 0) {
-        ret = -errno;
-        log_print(LOG_ERR, "ldb_filecache_read: error %d; %d %s %d %ld", ret, sdata->fd, buf, size, offset);
-        goto finish;
+    assert(fi && buf && size);
+    pthread_mutex_lock(&fi->mutex);
+
+    // We need to replace this because it is way to slow we should find a
+    // way to converge two files to the same buffer is they are reading
+    // simaltaneously
+    if (( offset > fi->offset + fi->size) || ( offset < fi->offset )) {
+        fi->present = offset;
+        if (fi->present > fi->server_length)
+            fi->present = fi->server_length;
+        r = buf_load_up_to_unlocked(fi, offset + size, buf);
+    }
+
+    /* the amount buffered is than what we want to fetch */
+    else if (((fi->offset + fi->size) - offset) < size || offset < fi->offset) {
+
+        int buffered = (fi->offset + fi->size) - offset;
+
+        fi->present = offset + buffered;
+        if (fi->present > fi->server_length)
+            fi->present = fi->server_length;
+
+        /* copy the remaining buffer to the read buffer */
+        size_t need_to_fetch = size - buffered;
+        memcpy(buf, fi->buf + (offset - fi->offset), buffered);
+
+        /* now the buffer can be filled with new data */
+        if ((r = buf_load_up_to_unlocked(fi, offset + buffered  + (BUFFER_SIZE), fi->buf)) < 0) {
+            log_print(LOG_ERR, "ldb_filecache_read: error %d; %d %s %d %ld", r, fi->fd, buf, size, offset);
+            goto finish;
+        }
+
+        fi->offset = offset + buffered;
+
+        fi->size = r;
+
+        if (r < need_to_fetch)
+            need_to_fetch = r;
+        else
+            r = size;
+
+        memcpy(buf + buffered, fi->buf, need_to_fetch);
+    }
+    else {
+        memcpy(buf, fi->buf + (offset - fi->offset), size);
+        r = size;
     }
 
 finish:
-
     // ret is bytes read, or error
     log_print(LOG_DEBUG, "Done reading.");
 
-    return ret;
+    pthread_mutex_unlock(&fi->mutex);
+    return r;
 }
 
 // top-level write call
@@ -517,6 +646,16 @@ static int ldb_filecache_close(struct ldb_filecache_sdata *sdata) {
 
     log_print(LOG_DEBUG, "ldb_filecache_close: close returns %d %s", ret, strerror(ret));
 
+
+    // mgreenway free all of my resources
+    // I'm not sure what to check
+    pthread_mutex_destroy(&sdata->mutex);
+
+    if (sdata->buf != NULL)
+        free(sdata->buf);
+
+
+    // end mgreenway
     if (sdata != NULL)
         free(sdata);
 
