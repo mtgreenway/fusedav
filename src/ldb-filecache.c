@@ -65,6 +65,7 @@ struct ldb_filecache_sdata {
     char *buf;
     ssize_t offset;
     ssize_t size;
+    char path[PATH_MAX]; // Only used for new replacement files.
 
 };
 
@@ -393,6 +394,10 @@ int ldb_filecache_open(char *cache_path, ldb_filecache_t *cache, const char *pat
     int ret = -EBADF;
     int flags = info->flags;
 
+    // mgreenway
+    ne_request *req = NULL;
+    const char *length = NULL;
+
     log_print(LOG_DEBUG, "ldb_filecache_open: %s", path);
 
     if (!(session = session_get(1))) {
@@ -415,17 +420,17 @@ int ldb_filecache_open(char *cache_path, ldb_filecache_t *cache, const char *pat
     // So we already no this information and it is in the stat struct
     // which we don't have immediate access to.  There must be better easier
     // way to get this
-    ne_request *req = NULL;
+    strncpy(sdata->path, path, PATH_MAX);
     req = ne_request_create(session, "HEAD", path);
     assert(req);
 
     if (ne_request_dispatch(req) != NE_OK) {
-        sd_journal_print(LOG_ERR, "HEAD failed: %s", ne_get_error(session));
+        log_print(LOG_ERR, "HEAD failed: %s", ne_get_error(session));
         ret = ENOENT;
         goto fail;
     }
 
-    const char *length = ne_get_response_header(req, "Content-Length");
+    length = ne_get_response_header(req, "Content-Length");
     sdata->server_length = length ? atoll(length) : 0;
 
     ne_request_destroy(req);
@@ -501,9 +506,11 @@ finish:
 }
 
 //mgreenway
-static int buf_load_up_to_unlocked(struct file_info *fi, off_t l, char *buf) {
+static int buf_load_up_to_unlocked(struct ldb_filecache_sdata *fi, off_t l, char *buf) {
 
     ne_session *session;
+    ne_content_range range;
+    ssize_t bytes_read;
     //assert(fi);
     if (!(session = session_get(1))) {
         errno = EIO;
@@ -516,14 +523,11 @@ static int buf_load_up_to_unlocked(struct file_info *fi, off_t l, char *buf) {
     if (l <= fi->present)
         return 0;
 
-    ne_content_range range;
     range.start = fi->present;
     range.end = l-1;
     range.total = 0;
 
-    ssize_t bytes_read;
-
-    if (buf_ne_get_range(session, fi->filename, &range, buf, &bytes_read) != NE_OK) {
+    if (buf_ne_get_range(session, fi->path, &range, buf, &bytes_read) != NE_OK) {
         log_print(LOG_DEBUG, "GET failed: %s\n", ne_get_error(session));
         errno = ENOENT;
         return -1;
@@ -541,10 +545,12 @@ ssize_t ldb_filecache_read(struct fuse_file_info *info, char *buf, size_t size, 
     struct ldb_filecache_sdata *fi = (struct ldb_filecache_sdata *)info->fh;
     ssize_t r = -1;
     log_print(LOG_DEBUG, "mgreenway_filecache_read: fd=%d", fi->fd);
+    log_print(LOG_DEBUG, "mgreenway_filecache_read: fd=%s", "test");
 
     assert(fi && buf && size);
     pthread_mutex_lock(&fi->mutex);
 
+    log_print(LOG_DEBUG, "the first path %s", fi->path);
     // We need to replace this because it is way to slow we should find a
     // way to converge two files to the same buffer is they are reading
     // simaltaneously
@@ -559,13 +565,14 @@ ssize_t ldb_filecache_read(struct fuse_file_info *info, char *buf, size_t size, 
     else if (((fi->offset + fi->size) - offset) < size || offset < fi->offset) {
 
         int buffered = (fi->offset + fi->size) - offset;
+        size_t need_to_fetch;
 
         fi->present = offset + buffered;
         if (fi->present > fi->server_length)
             fi->present = fi->server_length;
 
         /* copy the remaining buffer to the read buffer */
-        size_t need_to_fetch = size - buffered;
+        need_to_fetch = size - buffered;
         memcpy(buf, fi->buf + (offset - fi->offset), buffered);
 
         /* now the buffer can be filled with new data */

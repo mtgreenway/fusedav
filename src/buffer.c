@@ -29,6 +29,7 @@
 #include <ne_basic.h>
 #include <ne_request.h>
 #include <ne_session.h>
+#include <errno.h>
 
 #include "session.h"
 #include "buffer.h"

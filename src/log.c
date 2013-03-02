@@ -44,16 +44,19 @@ int log_print(int verbosity, const char *format, ...) {
     int r = 0;
     va_list ap;
     char *formatwithtid;
+    char *all_formatted;
 
     if (verbosity <= maximum_verbosity) {
         va_start(ap, format);
         asprintf(&formatwithtid, "[%s] [tid=%lu] %s", PACKAGE_VERSION, syscall(SYS_gettid), format);
         assert(formatwithtid);
+        vasprintf(&all_formatted, formatwithtid, ap);
         /*r = sd_journal_printv(verbosity, formatwithtid, ap); */
         openlog("fusedav", LOG_CONS | LOG_PID | LOG_NDELAY, LOG_LOCAL7);
-        syslog(verbosity, formatwithtid, ap);
+        syslog(verbosity, all_formatted);
         closelog();
         free(formatwithtid);
+        free(all_formatted);
         va_end(ap);
     }
 
