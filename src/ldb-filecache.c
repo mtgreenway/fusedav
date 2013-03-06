@@ -61,7 +61,7 @@ struct ldb_filecache_sdata {
     // actually be hijacking the persistent data.
 
     pthread_mutex_t mutex;
-    ne_off_t server_length, present;
+    ne_off_t server_length;
     char *buf;
     ssize_t offset;
     ssize_t size;
@@ -448,6 +448,8 @@ int ldb_filecache_open(char *cache_path, ldb_filecache_t *cache, const char *pat
         sdata->buf = malloc(BUFFER_SIZE);
     }
 
+    pthread_mutex_init(&sdata->mutex, NULL);
+
     // If open is called twice, both times with O_CREAT, fuse does not pass O_CREAT
     // the second time. (Unlike on a linux file system, where the second time open
     // is called with O_CREAT, the flag is there but is ignored.) So O_CREAT here
@@ -506,7 +508,7 @@ finish:
 }
 
 //mgreenway
-static int buf_load_up_to_unlocked(struct ldb_filecache_sdata *fi, off_t l, char *buf) {
+static int buf_load_up_to_unlocked(struct ldb_filecache_sdata *fi, off_t l, char *buf, ne_off_t present) {
 
     ne_session *session;
     ne_content_range range;
@@ -516,19 +518,20 @@ static int buf_load_up_to_unlocked(struct ldb_filecache_sdata *fi, off_t l, char
         errno = EIO;
         return -1;
     }
+    log_print(LOG_ERR, "The session username: %d\n", session);
 
     if (l > fi->server_length)
         l = fi->server_length;
 
-    if (l <= fi->present)
+    if (l <= present)
         return 0;
 
-    range.start = fi->present;
+    range.start = present;
     range.end = l-1;
     range.total = 0;
 
     if (buf_ne_get_range(session, fi->path, &range, buf, &bytes_read) != NE_OK) {
-        log_print(LOG_DEBUG, "GET failed: %s\n", ne_get_error(session));
+        log_print(LOG_ERR, "GET failed: %s\n", ne_get_error(session));
         errno = ENOENT;
         return -1;
     }
@@ -555,10 +558,13 @@ ssize_t ldb_filecache_read(struct fuse_file_info *info, char *buf, size_t size, 
     // way to converge two files to the same buffer is they are reading
     // simaltaneously
     if (( offset > fi->offset + fi->size) || ( offset < fi->offset )) {
-        fi->present = offset;
-        if (fi->present > fi->server_length)
-            fi->present = fi->server_length;
-        r = buf_load_up_to_unlocked(fi, offset + size, buf);
+        ne_off_t present;
+            log_print(LOG_ERR, "buffer miss: error offset %ld size %ld fi->offset %ld fi->size %ld", offset, size, fi->offset, fi->size);
+        present = offset;
+        if (present > fi->server_length)
+            present = fi->server_length;
+        r = buf_load_up_to_unlocked(fi, offset + size, buf, present);
+        log_print(LOG_ERR, "buffer miss: error result %d", r);
     }
 
     /* the amount buffered is than what we want to fetch */
@@ -566,17 +572,18 @@ ssize_t ldb_filecache_read(struct fuse_file_info *info, char *buf, size_t size, 
 
         int buffered = (fi->offset + fi->size) - offset;
         size_t need_to_fetch;
+        ne_off_t present;
 
-        fi->present = offset + buffered;
-        if (fi->present > fi->server_length)
-            fi->present = fi->server_length;
+        present = offset + buffered;
+        if (present > fi->server_length)
+            present = fi->server_length;
 
         /* copy the remaining buffer to the read buffer */
         need_to_fetch = size - buffered;
         memcpy(buf, fi->buf + (offset - fi->offset), buffered);
 
         /* now the buffer can be filled with new data */
-        if ((r = buf_load_up_to_unlocked(fi, offset + buffered  + (BUFFER_SIZE), fi->buf)) < 0) {
+        if ((r = buf_load_up_to_unlocked(fi, offset + buffered  + (BUFFER_SIZE), fi->buf, present)) < 0) {
             log_print(LOG_ERR, "ldb_filecache_read: error %d; %d %s %d %ld", r, fi->fd, buf, size, offset);
             goto finish;
         }
@@ -662,6 +669,7 @@ static int ldb_filecache_close(struct ldb_filecache_sdata *sdata) {
         free(sdata->buf);
 
 
+    log_print(LOG_NOTICE, "Actually Freeing ");
     // end mgreenway
     if (sdata != NULL)
         free(sdata);

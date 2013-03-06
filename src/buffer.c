@@ -33,6 +33,9 @@
 
 #include "session.h"
 #include "buffer.h"
+#include "log.h"
+
+#include <string.h>
 
 
 /**
@@ -48,26 +51,16 @@ int ne_read_response_to_buf(ne_request *req, char *buf, ssize_t *bytes_read)
 
     while ((len = ne_read_response_block(req, buf,
                         sizeof buf)) > 0) {
-
-        do {
-            ssize_t ret = len;
-            if (ret == -1 && errno == EINTR) {
-                continue;
-            } else if (ret >= 0) {
-                len -= ret;
-                buf += ret;
-        (*bytes_read) += ret;
-            }
-        } while (len > 0);
+        buf += len;
+        (*bytes_read) += len;
     }
 
     return len == 0 ? NE_OK : NE_ERROR;
 }
 
 
-static int dispatch_to_buffer(ne_request *req, char *buf, const char *range, ssize_t *bytes_read)
+static int dispatch_to_buffer(ne_session *sess, ne_request *req, char *buf, const char *range, ssize_t *bytes_read)
 {
-    ne_session *const sess = ne_get_session(req);
     const ne_status *const st = ne_get_status(req);
     int ret;
     size_t rlen;
@@ -106,18 +99,18 @@ static int dispatch_to_buffer(ne_request *req, char *buf, const char *range, ssi
 }
 
 
-static int get_range_common(ne_session *sess, const char *uri,
+static int get_range_common(ne_session *sess, const char *req_uri,
                             const char *brange, char *buf, ssize_t *bytes_read)
 
 {
-    ne_request *req = ne_request_create(sess, "GET", uri);
+    ne_request *req = ne_request_create(sess, "GET", req_uri);
     const ne_status *status;
     int ret;
 
     ne_add_request_header(req, "Range", brange);
     ne_add_request_header(req, "Accept-Ranges", "bytes");
 
-    ret = dispatch_to_buffer(req, buf, brange, bytes_read);
+    ret = dispatch_to_buffer(sess, req, buf, brange, bytes_read);
 
     status = ne_get_status(req);
 
@@ -142,7 +135,7 @@ static int get_range_common(ne_session *sess, const char *uri,
     return ret;
 }
 
-int buf_ne_get_range(ne_session *sess, const char *uri,
+int buf_ne_get_range(ne_session *sess, const char *req_uri,
                  ne_content_range *range, char *buf, ssize_t *bytes_read)
 {
     char brange[64];
@@ -151,7 +144,7 @@ int buf_ne_get_range(ne_session *sess, const char *uri,
     "bytes=%" FMT_NE_OFF_T "-%" FMT_NE_OFF_T, range->start,
     range->end);
 
-    return get_range_common(sess, uri, brange, buf, bytes_read);
+    return get_range_common(sess, req_uri, brange, buf, bytes_read);
 }
 
 //static int buffer_load(struct file_info *fi, off_t l, char *buf) {

@@ -40,7 +40,7 @@
 
 int ne_read_response_to_buf(ne_request *req, char *buf, ssize_t *bytes_read);
 
-static int dispatch_to_buffer(ne_request *req, char *buf, const char *range, ssize_t *bytes_read);
+static int dispatch_to_buffer(ne_session *sess, ne_request *req, char *buf, const char *range, ssize_t *bytes_read);
 
 static int get_range_common(ne_session *sess, const char *uri,
                             const char *brange, char *buf, ssize_t *bytes_read);
